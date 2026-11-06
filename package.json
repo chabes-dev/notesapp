@@ -1,0 +1,16 @@
+{
+  "name": "notes",
+  "private": true,
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "@fontsource/fraunces": "5.3.0",
+    "@fontsource/ibm-plex-mono": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@tiptap/core": "3.33.0",
+    "@tiptap/extension-placeholder": "3.33.0",
+    "@tiptap/extension-task-item": "3.33.0",
+    "@tiptap/extension-task-list": "3.33.0",
+    "@tiptap/starter-kit": "3.33.0",
+    "esbuild": "0.28.2"
+  }
+}

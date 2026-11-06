@@ -1,0 +1,8 @@
+{
+  // Cloudflare Worker that serves the built app (static files only, no server code).
+  "name": "notesapp",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./dist"
+  }
+}
