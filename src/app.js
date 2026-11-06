@@ -4,6 +4,8 @@ import StarterKit from '@tiptap/starter-kit';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import Placeholder from '@tiptap/extension-placeholder';
+import { TextSelection } from '@tiptap/pm/state';
+import { keydownHandler } from '@tiptap/pm/keymap';
 
 /* =========================================================
    Storage (IndexedDB, this computer only)
@@ -112,20 +114,104 @@ const Indent = Extension.create({
     };
   },
 });
-// Apple Notes style shortcuts (the TipTap defaults ⌘⌥1/2/3/0 also work)
-const AppleKeys = Extension.create({
-  name: 'appleKeys',
-  addKeyboardShortcuts() {
-    const c = () => this.editor.chain().focus();
-    return {
-      'Mod-Shift-t': () => c().toggleHeading({ level: 1 }).run(),
-      'Mod-Shift-h': () => c().toggleHeading({ level: 2 }).run(),
-      'Mod-Shift-j': () => c().toggleHeading({ level: 3 }).run(),
-      'Mod-Shift-b': () => c().setParagraph().run(),
-      'Mod-Shift-l': () => c().toggleTaskList().run(),
-    };
+// Dashed lists are bullet lists with a flag, like Apple Notes' "Dashed List".
+const DashedFlag = Extension.create({
+  name: 'dashedFlag',
+  addGlobalAttributes() {
+    return [{ types: ['bulletList'], attributes: { dashed: {
+      default: false,
+      parseHTML: el => el.getAttribute('data-dashed') === 'true',
+      renderHTML: a => (a.dashed ? { 'data-dashed': 'true' } : {}),
+    } } }];
   },
 });
+function setList(ed, kind) {
+  if (kind === 'numbered') return ed.chain().focus().toggleOrderedList().run();
+  const wantDashed = kind === 'dashed';
+  if (ed.isActive('bulletList')) {
+    const isDashed = ed.isActive('bulletList', { dashed: true });
+    if (isDashed === wantDashed) return ed.chain().focus().toggleBulletList().run();      // same style again = off
+    return ed.chain().focus().updateAttributes('bulletList', { dashed: wantDashed }).run();
+  }
+  return ed.chain().focus().toggleBulletList().updateAttributes('bulletList', { dashed: wantDashed }).run();
+}
+function toggleChecked(ed) {
+  const { $from } = ed.state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    const n = $from.node(d);
+    if (n.type.name === 'taskItem') {
+      ed.view.dispatch(ed.state.tr.setNodeMarkup($from.before(d), undefined, { ...n.attrs, checked: !n.attrs.checked }));
+      return true;
+    }
+  }
+  return false;
+}
+function moveItem(ed, dir) {   // ⌃⌘↑ / ⌃⌘↓ : move a list or checklist item
+  const { state } = ed, { $from } = state.selection;
+  let d = $from.depth;
+  while (d > 0 && !LIST_ITEMS.includes($from.node(d).type.name)) d--;
+  if (!d) return false;
+  const item = $from.node(d), parent = $from.node(d - 1), idx = $from.index(d - 1), sib = idx + dir;
+  if (sib < 0 || sib >= parent.childCount) return true;
+  const start = $from.before(d), offset = $from.pos - start, tr = state.tr;
+  let newStart;
+  if (dir < 0) {
+    const prev = parent.child(sib); newStart = start - prev.nodeSize;
+    tr.delete(start, start + item.nodeSize).insert(newStart, item);
+  } else {
+    const next = parent.child(sib);
+    tr.insert(start + item.nodeSize + next.nodeSize, item).delete(start, start + item.nodeSize);
+    newStart = start + next.nodeSize;
+  }
+  tr.setSelection(TextSelection.create(tr.doc, newStart + offset)).scrollIntoView();
+  ed.view.dispatch(tr);
+  return true;
+}
+function editLink(ed) {
+  const prev = ed.getAttributes('link').href || '';
+  const url = window.prompt('Link address', prev || 'https://');
+  if (url === null) return true;
+  const u = url.trim();
+  if (!u || u === 'https://') { ed.chain().focus().extendMarkRange('link').unsetLink().run(); return true; }
+  const href = /^[a-z]+:/i.test(u) ? u : 'https://' + u;
+  if (ed.state.selection.empty && !ed.isActive('link')) ed.chain().focus().insertContent({ type: 'text', text: href, marks: [{ type: 'link', attrs: { href } }] }).run();
+  else ed.chain().focus().extendMarkRange('link').setLink({ href }).run();
+  return true;
+}
+// Apple Notes keyboard shortcuts (support.apple.com/guide/notes/apd46c25187e/mac).
+// Wired in as the editor's own key handler so they win over the editor's built-in defaults.
+function appleBindings() {
+  const c = ed => ed.chain().focus();
+  return {
+    'Mod-Shift-t': ed => c(ed).toggleHeading({ level: 1 }).run() || true,
+    'Mod-Shift-h': ed => c(ed).toggleHeading({ level: 2 }).run() || true,
+    'Mod-Shift-j': ed => c(ed).toggleHeading({ level: 3 }).run() || true,
+    'Mod-Shift-b': ed => c(ed).setParagraph().run() || true,
+    'Mod-Shift-m': ed => c(ed).toggleCodeBlock().run() || true,
+    'Mod-Shift-7': ed => setList(ed, 'bullet') || true,
+    'Mod-Shift-8': ed => setList(ed, 'dashed') || true,
+    'Mod-Shift-9': ed => setList(ed, 'numbered') || true,
+    'Mod-Shift-l': ed => c(ed).toggleTaskList().run() || true,
+    'Mod-Shift-u': ed => toggleChecked(ed),
+    "Mod-'": ed => c(ed).toggleBlockquote().run() || true,
+    'Mod-l': ed => c(ed).setHorizontalRule().run() || true,
+    'Mod-k': ed => editLink(ed),
+    'Ctrl-Mod-ArrowUp': ed => moveItem(ed, -1),
+    'Ctrl-Mod-ArrowDown': ed => moveItem(ed, 1),
+    'Alt-Tab': ed => c(ed).insertContent('\t').run(),
+  };
+}
+function appleKeyHandler(getEd) {
+  const map = appleBindings(), bound = {};
+  for (const k in map) bound[k] = () => map[k](getEd()) !== false;
+  return keydownHandler(bound);
+}
+const editorExtensions = () => [
+  StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: { openOnClick: false, autolink: true } }),
+  TaskList, TaskItem.configure({ nested: true }),
+  Placeholder.configure({ placeholder: 'Start writing…' }),
+  Indent, DashedFlag,
+];
 
 /* =========================================================
    Notes
@@ -193,7 +279,7 @@ class Pane {
     this.noteId = null;
     this.el = h(`<section class="pane">
       <header class="phead">
-        <button class="ibtn sidetoggle" title="Show/hide sidebar (${K}⌥S)">${ICON.side}</button>
+        <button class="ibtn sidetoggle" title="Show/hide sidebar (${isMac ? '⌃⌘S' : 'Ctrl+Alt+S'})">${ICON.side}</button>
         <div class="date"></div>
         <div class="fmt fadeui">
           <button class="pill aa" title="Text styles">Aa</button>
@@ -208,12 +294,8 @@ class Pane {
     </section>`);
     this.editor = new Editor({
       element: $('.host', this.el),
-      extensions: [
-        StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: { openOnClick: false, autolink: true } }),
-        TaskList, TaskItem.configure({ nested: true }),
-        Placeholder.configure({ placeholder: 'Start writing…' }),
-        Indent, AppleKeys,
-      ],
+      extensions: editorExtensions(),
+      editorProps: { handleKeyDown: appleKeyHandler(() => this.editor) },
       content: '',
       onUpdate: () => this.changed(),
       onFocus: () => setActive(this),
@@ -306,8 +388,11 @@ class Pane {
       ['Subheading', `${K}⇧J`, () => ed.chain().focus().toggleHeading({ level: 3 }).run(), A('heading', { level: 3 })],
       ['Body', `${K}⇧B`, () => ed.chain().focus().setParagraph().run(), A('paragraph') && !ed.isActive('listItem') ? 'on' : ''],
       '-',
-      ['Bulleted list', `${K}⇧8`, () => ed.chain().focus().toggleBulletList().run(), A('bulletList')],
-      ['Numbered list', `${K}⇧7`, () => ed.chain().focus().toggleOrderedList().run(), A('orderedList')],
+      ['Monostyled', `${K}⇧M`, () => ed.chain().focus().toggleCodeBlock().run(), A('codeBlock')],
+      '-',
+      ['Bulleted list', `${K}⇧7`, () => setList(ed, 'bullet'), ed.isActive('bulletList') && !ed.isActive('bulletList', { dashed: true }) ? 'on' : ''],
+      ['Dashed list', `${K}⇧8`, () => setList(ed, 'dashed'), A('bulletList', { dashed: true })],
+      ['Numbered list', `${K}⇧9`, () => setList(ed, 'numbered'), A('orderedList')],
       ['Checklist', `${K}⇧L`, () => ed.chain().focus().toggleTaskList().run(), A('taskList')],
       '-',
       ['Bold', `${K}B`, () => ed.chain().focus().toggleBold().run(), A('bold')],
@@ -317,8 +402,12 @@ class Pane {
       '-',
       ['Indent', `${K}] · Tab`, () => { ed.commands.focus(); ed.commands.keyboardShortcut('Tab'); }, ''],
       ['Outdent', `${K}[ · ⇧Tab`, () => { ed.commands.focus(); ed.commands.keyboardShortcut('Shift-Tab'); }, ''],
-      ['Quote', '', () => ed.chain().focus().toggleBlockquote().run(), A('blockquote')],
-      ['Monospaced', '', () => ed.chain().focus().toggleCodeBlock().run(), A('codeBlock')],
+      ['Block quote', `${K}'`, () => ed.chain().focus().toggleBlockquote().run(), A('blockquote')],
+      ['Divider line', `${K}L`, () => ed.chain().focus().setHorizontalRule().run(), ''],
+      ['Link…', `${K}K`, () => editLink(ed), A('link')],
+      '-',
+      ['Rewrite in floating window', `${isMac ? '⌥⌘' : 'Ctrl+Alt+'}N`, () => openSandbox(), ''],
+      ['All shortcuts', `${K}/`, () => showShortcuts(), ''],
     ];
     menu(anchor, items, { alignRight: true });
   }
@@ -357,7 +446,7 @@ function layoutPanes() {
 }
 function openNote(id, { newPane = false } = {}) {
   const already = S.panes.find(p => p.noteId === id);
-  if (already && !newPane) { setActive(already); already.editor.commands.focus(); return; }
+  if (already && !newPane) { setActive(already); return; }
   if (newPane) return addPane(id, S.active);
   S.active.show(id);
 }
@@ -389,14 +478,15 @@ function scheduleList() { if (listQueued) return; listQueued = true; requestAnim
 function renderFolders() {
   const live = [...S.notes.values()].filter(n => !n.deleted);
   const count = id => id === 'all' ? live.length : id === 'trash' ? S.notes.size - live.length : live.filter(n => n.folder === id).length;
-  const row = (id, name, editable) => `<button class="folder ${S.view === id && !S.query ? 'on' : ''}" data-f="${id}" ${editable ? 'data-edit="1"' : ''}>${esc(name)}<span class="n">${count(id) || ''}</span></button>`;
+  const row = (id, name, editable) => `<button tabindex="-1" class="folder ${S.view === id && !S.query ? 'on' : ''}" data-f="${id}" ${editable ? 'data-edit="1"' : ''}>${esc(name)}<span class="n">${count(id) || ''}</span></button>`;
   $('#flist').innerHTML =
     `<div class="fsec">${row('all', 'All Notes')}${row('notes', 'Notes')}</div>` +
     (S.folders.length ? `<div class="label">Folders</div><div class="fsec">${S.folders.map(f => row(f.id, f.name, true)).join('')}</div>` : '') +
     `<div class="fsec">${row('trash', 'Recently Deleted')}</div>`;
 }
+const visibleSorted = () => visibleNotes().sort((a, b) => (b.pinned - a.pinned) || ((S.view === 'trash' ? b.deleted - a.deleted : b.updated - a.updated)));
 function renderList() {
-  const notes = visibleNotes().sort((a, b) => (b.pinned - a.pinned) || ((S.view === 'trash' ? b.deleted - a.deleted : b.updated - a.updated)));
+  const notes = visibleSorted();
   $('#vname').textContent = viewName();
   const open = new Set(S.panes.map(p => p.noteId));
   const activeId = S.active && S.active.noteId;
@@ -436,10 +526,7 @@ function wireSidebar() {
     if (b.dataset.f === 'trash') return trashNote(n.id);
     persist({ ...n, folder: b.dataset.f, deleted: 0 }); toast(`Moved to ${b.textContent.replace(/\d+$/, '')}`);
   });
-  $('#newfolder').onclick = async () => {
-    const f = { id: uid(), name: 'New Folder' }; S.folders.push(f); await saveFolders(); renderFolders();
-    renameFolder(f.id, $(`.folder[data-f="${f.id}"]`));
-  };
+  $('#newfolder').onclick = () => newFolderNow();
   $('#compose').onclick = () => composeNew();
   $('#q').addEventListener('input', e => { S.query = e.target.value.trim(); scheduleList(); });
   $('#q').addEventListener('keydown', e => { if (e.key === 'Escape') { e.target.value = ''; S.query = ''; scheduleList(); S.active.editor.commands.focus(); } });
@@ -448,6 +535,7 @@ function wireSidebar() {
   notesEl.addEventListener('click', e => {
     const r = e.target.closest('.note'); if (!r) return;
     openNote(r.dataset.id, { newPane: e.metaKey || e.ctrlKey });
+    if (!(e.metaKey || e.ctrlKey)) notesEl.focus({ preventScroll: true });
   });
   notesEl.addEventListener('dragstart', e => {
     const r = e.target.closest('.note'); if (!r) return;
@@ -582,23 +670,241 @@ async function importAll(file) {
 /* =========================================================
    Keyboard (app level)
    ========================================================= */
+// Sidebar keyboard: Tab cycles folders → list → search (like Notes), arrows move, Return starts typing.
+const SIDE_STOPS = () => [$('#flist'), $('#notes'), $('#q')];
+function sidebarKeys(e) {
+  const ae = document.activeElement, stops = SIDE_STOPS(), i = stops.findIndex(x => x === ae || (x !== $('#q') && x.contains(ae)));
+  if (i < 0) return false;
+  if (e.key === 'Tab') { e.preventDefault(); stops[(i + (e.shiftKey ? 2 : 1)) % 3].focus(); return true; }
+  if (i === 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    const ids = [...$('#flist').querySelectorAll('.folder')].map(b => b.dataset.f), j = ids.indexOf(S.view);
+    const next = ids[Math.max(0, Math.min(ids.length - 1, j + (e.key === 'ArrowDown' ? 1 : -1)))];
+    if (next) { S.view = next; S.query = ''; $('#q').value = ''; scheduleList(); saveLayout(); }
+    return true;
+  }
+  if (i === 1 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    const ids = visibleSorted().map(n => n.id), j = ids.indexOf(S.active.noteId);
+    const next = ids[j < 0 ? 0 : Math.max(0, Math.min(ids.length - 1, j + (e.key === 'ArrowDown' ? 1 : -1)))];
+    if (next) { S.active.show(next); requestAnimationFrame(() => { const r = $(`.note[data-id="${next}"]`); r && r.scrollIntoView({ block: 'nearest' }); }); }
+    return true;
+  }
+  if (i === 1 && e.key === 'Enter') { e.preventDefault(); S.active.noteId && S.active.editor.commands.focus('end'); return true; }
+  return false;
+}
+let zoom = parseFloat(localStorage.getItem('zoom') || '1') || 1;
+function setZoom(z) {
+  zoom = Math.round(Math.max(0.7, Math.min(1.8, z)) * 100) / 100;
+  document.documentElement.style.setProperty('--z', zoom);
+  try { localStorage.setItem('zoom', zoom); } catch {}
+}
+setZoom(zoom);
+function duplicateNote() {
+  const src = S.active.noteId && S.notes.get(S.active.noteId); if (!src || src.deleted) return;
+  S.active.flush();
+  const n = newNote(src.folder);
+  Object.assign(n, { doc: src.doc, text: src.text, title: src.title, snippet: src.snippet });
+  persist(n).then(() => { S.active.show(n.id); toast('Duplicated'); });
+}
+async function newFolderNow() {
+  document.body.classList.remove('hide-side', 'hide-folders', 'typing');
+  const f = { id: uid(), name: 'New Folder' }; S.folders.push(f); await saveFolders(); renderFolders();
+  renameFolder(f.id, $(`.folder[data-f="${f.id}"]`));
+}
+function printNote() {
+  const p = S.active; if (!p.noteId) return;
+  p.flush(); p.el.classList.add('printme'); document.body.classList.add('printing');
+  const done = () => { p.el.classList.remove('printme'); document.body.classList.remove('printing'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  window.print();
+  setTimeout(done, 1000);
+}
 window.addEventListener('keydown', e => {
-  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+  const mod = e.metaKey || e.ctrlKey, c = e.code;
   if (!mod) {
+    if (sidebarKeys(e)) return;
     if ((e.key === 'Backspace' || e.key === 'Delete') && document.activeElement === $('#notes') && S.active.noteId) { e.preventDefault(); trashNote(S.active.noteId); }
-    if (e.key === 'Escape') { closeMenus(); document.body.classList.remove('typing'); }
+    if (e.key === 'Escape') { closeMenus(); closeShortcuts(); document.body.classList.remove('typing'); }
     return;
   }
-  if (k === 'n' && !e.shiftKey) { e.preventDefault(); composeNew(); }
-  else if ((k === 'f' && e.altKey) || (k === 'k' && !e.altKey)) { e.preventDefault(); document.body.classList.remove('hide-side', 'typing'); $('#q').focus(); $('#q').select(); }
-  else if (e.code === 'Backslash') { e.preventDefault(); addPane(newNote(currentFolder()).id, S.active); }
-  else if (e.code === 'KeyS' && e.altKey) { e.preventDefault(); toggleSide(); }
-  else if (e.code === 'KeyW' && e.altKey) { e.preventDefault(); closePane(S.active); }
-  else if (e.altKey && (e.code === 'ArrowRight' || e.code === 'ArrowLeft')) {   // move between panes
-    const i = S.panes.indexOf(S.active) + (e.code === 'ArrowRight' ? 1 : -1);
-    if (S.panes[i]) { e.preventDefault(); setActive(S.panes[i]); S.panes[i].editor.commands.focus(); }
+  const go = fn => { e.preventDefault(); e.stopPropagation(); fn(); };
+  const sidebarCombo = isMac ? (e.metaKey && e.ctrlKey) : (e.ctrlKey && e.altKey);
+  if (c === 'KeyN' && e.altKey && !e.shiftKey) go(openSandbox);                       // ⌥⌘N floating rewrite window
+  else if (c === 'KeyN' && e.shiftKey) go(newFolderNow);                              // ⇧⌘N new folder
+  else if (c === 'KeyN') go(composeNew);                                              // ⌘N new note
+  else if (c === 'KeyS' && (sidebarCombo || e.altKey)) go(toggleSide);                // ⌃⌘S sidebar
+  else if (c === 'KeyF' && e.altKey) go(() => { document.body.classList.remove('hide-side', 'typing'); $('#q').focus(); $('#q').select(); });
+  else if (c === 'KeyD' && !e.shiftKey && !e.altKey) go(duplicateNote);              // ⌘D duplicate
+  else if (c === 'KeyP' && !e.shiftKey && !e.altKey) go(printNote);                  // ⌘P print
+  else if (c === 'Slash') go(showShortcuts);                                          // ⌘/ cheat sheet
+  else if ((c === 'Equal' && !e.shiftKey) || (c === 'Equal' && e.shiftKey) || (c === 'Period' && e.shiftKey)) go(() => setZoom(zoom + 0.1));
+  else if ((c === 'Minus') || (c === 'Comma' && e.shiftKey)) go(() => setZoom(zoom - 0.1));
+  else if (c === 'Digit0' && e.shiftKey) go(() => setZoom(1));
+  else if (c === 'Backslash') go(() => addPane(newNote(currentFolder()).id, S.active));
+  else if (c === 'KeyW' && e.altKey) go(() => closePane(S.active));
+  else if (e.altKey && (c === 'ArrowRight' || c === 'ArrowLeft')) {   // move between panes
+    const i = S.panes.indexOf(S.active) + (c === 'ArrowRight' ? 1 : -1);
+    if (S.panes[i]) go(() => { setActive(S.panes[i]); S.panes[i].editor.commands.focus(); });
   }
 }, true);
+
+/* =========================================================
+   Floating rewrite window (⌥⌘N)
+   A sandbox: the passage is copied in, the original stays untouched
+   until you press Replace or Insert below. Floats above every app
+   (Chrome's Document Picture-in-Picture); falls back to a small window.
+   ========================================================= */
+let SB = null;   // { pane, noteId, from, to, inline, original, win, editor, off }
+const words = t => (t.trim().match(/\S+/g) || []).length;
+async function openSandbox() {
+  const pane = S.active, ed = pane && pane.editor;
+  if (!pane || !pane.noteId) return toast('Open a note first');
+  const st = ed.state;
+  let { from, to, empty } = st.selection;
+  if (empty) {                                // no selection: take the paragraph / list item you're in
+    const $f = st.selection.$from;
+    let d = $f.depth;
+    for (let x = $f.depth; x > 0; x--) if (LIST_ITEMS.includes($f.node(x).type.name)) { d = x; break; }
+    from = $f.before(d); to = $f.after(d);
+  }
+  const slice = st.doc.slice(from, to);
+  // a selection inside one paragraph comes back as bare text: remember that, so Replace keeps the sentence whole
+  const inline = slice.content.childCount > 0 && slice.content.firstChild.isInline;
+  let blocks = slice.content.toJSON() || [];
+  if (inline) blocks = [{ type: 'paragraph', content: blocks }];
+  // only list items selected → wrap them back in their list so the sandbox shows them as a list
+  if (blocks.length && LIST_ITEMS.includes(blocks[0].type)) blocks = [{ type: blocks[0].type === 'taskItem' ? 'taskList' : 'bulletList', content: blocks }];
+  const original = { type: 'doc', content: blocks.length ? blocks : [{ type: 'paragraph' }] };
+  const originalText = st.doc.textBetween(from, to, '\n');
+
+  // open the window synchronously inside the key press, so Chrome allows it
+  let win;
+  const forcePopup = localStorage.getItem('sandboxPopup') === '1';
+  try {
+    if (!forcePopup && 'documentPictureInPicture' in window) win = await documentPictureInPicture.requestWindow({ width: 560, height: 460 });
+  } catch (err) { win = null; }
+  if (!win) win = window.open('', 'notes-rewrite', 'popup,width=580,height=520');
+  if (!win) return toast('Chrome blocked the floating window');
+  closeSandbox(true);
+
+  const doc = win.document;
+  doc.title = 'Rewrite';
+  doc.head.innerHTML = '';
+  document.querySelectorAll('style').forEach(st => doc.head.append(st.cloneNode(true)));
+  doc.body.className = 'sandbox';
+  doc.body.innerHTML = `
+    <header class="sbhead">
+      <div class="sbtitle"><span class="label">Rewrite</span><span class="sbsrc"></span></div>
+      <div class="sbcount"></div>
+    </header>
+    <div class="sbbody"><div class="host"></div></div>
+    <footer class="sbfoot">
+      <button class="pill" data-a="reset" title="Bring back the original text">Start over</button>
+      <span style="flex:1"></span>
+      <button class="pill" data-a="below" title="Keep the original and add this underneath">Insert below</button>
+      <button class="pill primary" data-a="replace" title="${isMac ? '⌘' : 'Ctrl+'}Return">Replace</button>
+    </footer>`;
+  let editor;
+  editor = new Editor({ element: doc.querySelector('.host'), extensions: editorExtensions(), editorProps: { handleKeyDown: appleKeyHandler(() => editor) }, content: original });
+  SB = { pane, noteId: pane.noteId, from, to, inline, original, originalWords: words(originalText), win, editor };
+
+  // keep the target range pointing at the same text while you keep editing the note
+  const track = ({ transaction }) => {
+    if (!SB || SB.pane !== pane || pane.noteId !== SB.noteId || SB.applying || !transaction.docChanged) return;
+    SB.from = transaction.mapping.map(SB.from, 1);
+    SB.to = Math.max(SB.from, transaction.mapping.map(SB.to, -1));
+  };
+  ed.on('transaction', track);
+  SB.off = () => ed.off('transaction', track);
+
+  const n = S.notes.get(pane.noteId);
+  doc.querySelector('.sbsrc').textContent = n ? n.title : '';
+  const count = () => { doc.querySelector('.sbcount').textContent = `${SB.originalWords} → ${words(editor.getText())} words`; };
+  editor.on('update', count); count();
+  doc.querySelector('.sbfoot').addEventListener('click', e => {
+    const a = e.target.closest('[data-a]'); if (!a) return;
+    if (a.dataset.a === 'reset') { editor.commands.setContent(SB.original); count(); editor.commands.focus('end'); }
+    if (a.dataset.a === 'replace') applySandbox('replace');
+    if (a.dataset.a === 'below') applySandbox('below');
+  });
+  doc.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); applySandbox('replace'); }
+    if (e.key === 'Escape') { e.preventDefault(); win.close(); }
+  });
+  win.addEventListener('pagehide', () => { if (SB && SB.win === win) closeSandbox(false); });
+  editor.commands.focus('end');
+}
+function sandboxTarget() {
+  // the note may have moved to another pane, or been closed: find it, or reopen it
+  let pane = S.panes.includes(SB.pane) && SB.pane.noteId === SB.noteId ? SB.pane : S.panes.find(p => p.noteId === SB.noteId);
+  if (!pane) {
+    const n = S.notes.get(SB.noteId);
+    if (!n || n.deleted) return null;
+    pane = S.active; pane.show(SB.noteId);
+  }
+  return pane;
+}
+function applySandbox(how) {
+  if (!SB) return;
+  const pane = sandboxTarget();
+  if (!pane) return toast('The original note is gone');
+  const ed = pane.editor, out = (SB.editor.getJSON().content || []).slice();
+  const isEmptyPara = n => n && n.type === 'paragraph' && !(n.content && n.content.length);
+  while (out.length > 1 && isEmptyPara(out[out.length - 1])) out.pop();   // drop the editor's trailing empty line
+  const size = Math.max(0, ed.state.doc.content.size);
+  const from = Math.min(SB.from, size), to = Math.min(SB.to, size);
+  SB.applying = true;
+  try {
+    if (how === 'replace') {
+      const before = ed.state.doc.content.size;
+      const content = SB.inline && out.length === 1 && out[0].type === 'paragraph' ? (out[0].content || []) : out;
+          if (Array.isArray(content) && !content.length) ed.chain().deleteRange({ from, to }).run();
+      else ed.chain().insertContentAt({ from, to }, content).run();
+      SB.to = to + (ed.state.doc.content.size - before);
+      SB.from = from;
+      SB.original = SB.editor.getJSON();                 // the new text is now "the original"
+      SB.originalWords = words(SB.editor.getText());
+      SB.win.document.querySelector('.sbcount').textContent = `${SB.originalWords} → ${SB.originalWords} words`;
+      toast('Replaced');
+    } else {
+      const $to = ed.state.doc.resolve(to);
+      const at = $to.depth >= 1 ? $to.after(1) : to;
+      ed.chain().insertContentAt(at, out).run();
+      toast('Added below');
+    }
+  } finally { SB.applying = false; }
+  pane.flush();
+  SB.editor.commands.focus();
+}
+function closeSandbox(silent) {
+  if (!SB) return;
+  const s = SB; SB = null;
+  try { s.off && s.off(); s.editor.destroy(); } catch {}
+  if (!silent) { try { s.win.close(); } catch {} }
+}
+window.addEventListener('pagehide', () => { if (SB) try { SB.win.close(); } catch {} });
+
+/* =========================================================
+   Shortcut cheat sheet (⌘/)
+   ========================================================= */
+const KEYS = isMac ? { cmd: '⌘', opt: '⌥', ctl: '⌃', sh: '⇧' } : { cmd: 'Ctrl+', opt: 'Alt+', ctl: 'Ctrl+', sh: 'Shift+' };
+function showShortcuts() {
+  closeShortcuts();
+  const { cmd, opt, ctl, sh } = KEYS;
+  const groups = [
+    ['Notes', [['New note', cmd + 'N'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
+    ['Side by side', [['Open a note next to this one', cmd + '\\'], [(isMac ? '⌘' : 'Ctrl') + '-click a note', 'opens it in a new pane'], ['Move between panes', opt + cmd + '← →'], ['Close pane', opt + cmd + 'W']]],
+    ['Text styles', [['Title', sh + cmd + 'T'], ['Heading', sh + cmd + 'H'], ['Subheading', sh + cmd + 'J'], ['Body', sh + cmd + 'B'], ['Monostyled', sh + cmd + 'M'], ['Block quote', cmd + "'"]]],
+    ['Lists', [['Bulleted', sh + cmd + '7'], ['Dashed', sh + cmd + '8'], ['Numbered', sh + cmd + '9'], ['Checklist', sh + cmd + 'L'], ['Tick checklist item', sh + cmd + 'U'], ['Indent / outdent', cmd + '] · ' + cmd + '[ · Tab'], ['Move item up / down', ctl + cmd + '↑ ↓'], ['Tab inside a list item', opt + 'Tab']]],
+    ['Edit', [['Bold · Italic · Underline', cmd + 'B · ' + cmd + 'I · ' + cmd + 'U'], ['Strikethrough', sh + cmd + 'S'], ['Link', cmd + 'K'], ['Divider line', cmd + 'L'], ['Bigger / smaller text', cmd + '+ · ' + cmd + '−'], ['Default text size', sh + cmd + '0']]],
+  ];
+  const el = h(`<div id="cheats"><div class="cheatbox"><div class="lhead"><h1>Keyboard shortcuts</h1><button class="ibtn" title="Close (Esc)">${ICON.close}</button></div>
+    <div class="cheatcols">${groups.map(([g, rows]) => `<section><div class="label">${esc(g)}</div>${rows.map(([a, k]) => `<div class="crow"><span>${esc(a)}</span><kbd>${esc(k)}</kbd></div>`).join('')}</section>`).join('')}</div></div></div>`);
+  el.addEventListener('mousedown', ev => { if (ev.target === el || ev.target.closest('.ibtn')) closeShortcuts(); });
+  document.body.append(el);
+}
+function closeShortcuts() { const c = $('#cheats'); if (c) c.remove(); }
 
 /* =========================================================
    Sync between windows
