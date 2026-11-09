@@ -168,3 +168,9 @@ body.sandbox .ProseMirror>h2:first-child{font-size:1.3em;font-weight:500}
   body.printing .pbody{overflow:visible;padding:0}
   body.printing .ProseMirror{min-height:0;max-width:none}
 }
+
+/* ⌘N floating note window */
+body.floatnote{display:flex;height:100vh}
+body.floatnote .pane{flex:1}
+body.floatnote .pbody{padding:6px 28px 20vh}
+body.floatnote .phead{padding:10px 12px 4px}

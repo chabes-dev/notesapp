@@ -4,7 +4,7 @@ import StarterKit from '@tiptap/starter-kit';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import Placeholder from '@tiptap/extension-placeholder';
-import { TextSelection } from '@tiptap/pm/state';
+import { TextSelection, Plugin } from '@tiptap/pm/state';
 import { keydownHandler } from '@tiptap/pm/keymap';
 
 /* =========================================================
@@ -35,7 +35,7 @@ const S = { notes: new Map(), folders: [], view: 'all', query: '', panes: [], ac
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const bc = 'BroadcastChannel' in window ? new BroadcastChannel('notes-sync') : null;
 const $ = (s, el = document) => el.querySelector(s);
-const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const h = (html, d = document) => { const t = d.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const norm = s => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -90,6 +90,23 @@ const Indent = Extension.create({
     }];
   },
   addCommands() { return { indent: () => shiftIndent(1), outdent: () => shiftIndent(-1) }; },
+  // lists indent themselves: a line that joins a list drops its own indent (no gap after the bullet)
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      appendTransaction(trs, _old, state) {
+        if (!trs.some(t => t.docChanged)) return null;
+        let tr = null;
+        state.doc.descendants((node, pos, parent) => {
+          if (INDENTABLE.includes(node.type.name) && node.attrs.indent && parent && LIST_ITEMS.includes(parent.type.name)) {
+            tr = tr || state.tr;
+            tr.setNodeMarkup(pos, undefined, { ...node.attrs, indent: 0 });
+          }
+          return !node.isTextblock;
+        });
+        return tr;
+      },
+    })];
+  },
   addKeyboardShortcuts() {
     const ed = this.editor;
     const fwd = () => {
@@ -236,11 +253,12 @@ async function hardDelete(id, { broadcast = true } = {}) {
   S.notes.delete(id);
   await DB.del('notes', id);
   if (broadcast && bc) bc.postMessage({ t: 'gone', id });
-  S.panes.forEach(p => { if (p.noteId === id) p.show(null); });
+  livePanes().forEach(p => { if (p.noteId === id) p.show(null); });
   scheduleList();
 }
 const isBlank = n => !n || !n.text.trim();
-const openElsewhere = (id, except) => S.panes.some(p => p !== except && p.noteId === id);
+const openElsewhere = (id, except) => livePanes().some(p => p !== except && p.noteId === id);
+const livePanes = () => FLOATS.length ? [...S.panes, ...FLOATS.map(f => f.pane)] : S.panes;
 function discardIfBlank(id, except) {
   const n = S.notes.get(id);
   if (n && isBlank(n) && !openElsewhere(id, except)) hardDelete(id);
@@ -249,7 +267,7 @@ async function trashNote(id) {
   const n = S.notes.get(id); if (!n) return;
   if (n.deleted) { if (confirm(`Delete "${n.title}" forever?`)) hardDelete(id); return; }
   await persist({ ...n, deleted: Date.now(), pinned: false });
-  S.panes.forEach(p => { if (p.noteId === id) p.show(null); });
+  livePanes().forEach(p => { if (p.noteId === id) p.show(null); });
   toast('Moved to Recently Deleted');
 }
 function fmtDate(ts, long) {
@@ -275,8 +293,9 @@ function groupOf(ts) {
    Panes (side-by-side windows inside the app)
    ========================================================= */
 class Pane {
-  constructor(noteId) {
+  constructor(noteId, opts = {}) {
     this.noteId = null;
+    this.floating = opts.win || null;          // set when this pane lives in a floating window
     this.el = h(`<section class="pane">
       <header class="phead">
         <button class="ibtn sidetoggle" title="Show/hide sidebar (${isMac ? '⌃⌘S' : 'Ctrl+Alt+S'})">${ICON.side}</button>
@@ -291,7 +310,8 @@ class Pane {
       </header>
       <div class="pbody"><div class="host"></div></div>
       <div class="pblank">No note open.<br><span style="font-size:15px">Pick one from the list, or press ${K}N.</span></div>
-    </section>`);
+    </section>`, opts.win ? opts.win.document : document);
+    if (opts.mount) opts.mount(this.el);       // floating: put it in its window before the editor starts
     this.editor = new Editor({
       element: $('.host', this.el),
       extensions: editorExtensions(),
@@ -311,7 +331,7 @@ class Pane {
     $('.aa', el).onclick = e => { e.stopPropagation(); this.styleMenu(e.currentTarget); };
     $('.chk', el).onclick = () => this.editor.chain().focus().toggleTaskList().run();
     $('.sp', el).onclick = () => addPane(newNote(currentFolder()).id, this);
-    $('.po', el).onclick = () => this.noteId && popOut(this.noteId);
+    $('.po', el).onclick = () => { if (!this.noteId) return; if (this.floating) dockFloat(this); else popOut(this.noteId); };
     $('.cl', el).onclick = () => closePane(this);
     // links: ⌘-click opens them
     $('.host', el).addEventListener('click', e => {
@@ -319,7 +339,9 @@ class Pane {
     });
     // typing hides everything but the words (like Spark)
     $('.host', el).addEventListener('keydown', e => {
+      this.lastType = Date.now();
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (this.floating) return;
       if (e.key.length === 1 || e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Tab') hideChrome();
     });
     // drop a note from the list onto this pane to open it here
@@ -350,6 +372,14 @@ class Pane {
   header() {
     const n = this.noteId && S.notes.get(this.noteId);
     $('.date', this.el).textContent = n ? (n.deleted ? 'In Recently Deleted · restore it to edit' : fmtDate(n.updated, true)) : '';
+    if (this.floating) {
+      $('.sidetoggle', this.el).style.display = 'none';
+      $('.sp', this.el).style.display = 'none';
+      $('.cl', this.el).style.display = 'none';
+      $('.po', this.el).title = 'Dock into the main window';
+      if (n) this.floating.document.title = n.title;
+      return;
+    }
     $('.cl', this.el).style.display = S.panes.length > 1 ? '' : 'none';
     $('.sidetoggle', this.el).style.display = S.panes[0] === this ? '' : 'none';
   }
@@ -369,13 +399,14 @@ class Pane {
     const next = { ...n, doc, text, ...summarize(text), updated: Date.now() };
     this.shown = next.updated;
     persist(next);
-    S.panes.forEach(p => { if (p !== this) p.receive(next); });
+    livePanes().forEach(p => { if (p !== this) p.receive(next); });
     this.header();
   }
   receive(note) {   // the same note changed in another pane or window
     if (!note || this.noteId !== note.id) return;
     if (note.updated > (this.shown || 0)) {
-      if (this.editor.isFocused) this.pending = true;   // don't yank text from under the cursor
+      const typingHere = this.editor.isFocused && this.el.ownerDocument.hasFocus() && Date.now() - (this.lastType || 0) < 5000;
+      if (typingHere) this.pending = true;   // don't yank text from under the cursor
       else { this.editor.commands.setContent(note.doc || '', { emitUpdate: false }); this.shown = note.updated; this.pending = false; this.dirty = false; }
     }
     this.header();
@@ -415,7 +446,7 @@ class Pane {
 }
 
 function setActive(p) {
-  if (S.active === p) return;
+  if (!p || S.active === p || p.floating) return;   // floating notes never become the main window's target
   S.active = p;
   S.panes.forEach(x => x.el.classList.toggle('active', x === p));
   scheduleList(); saveLayout();
@@ -451,7 +482,7 @@ function openNote(id, { newPane = false } = {}) {
   S.active.show(id);
 }
 function popOut(id) {
-  S.panes.forEach(p => p.flush());
+  livePanes().forEach(p => p.flush());
   window.open(`${location.pathname}?note=${encodeURIComponent(id)}&solo=1`, '_blank', 'popup,width=760,height=860');
 }
 
@@ -600,7 +631,7 @@ window.addEventListener('mousemove', e => {
 });
 function toggleSide() { document.body.classList.toggle('hide-side'); saveLayout(); }
 
-function closeMenus() { document.querySelectorAll('.pop').forEach(p => p.remove()); }
+function closeMenus() { [document, ...FLOATS.map(f => f.win.document)].forEach(d => { try { d.querySelectorAll('.pop').forEach(p => p.remove()); } catch {} }); }
 function menu(anchor, items, { alignRight = false } = {}) {
   closeMenus();
   const pop = h('<div class="pop"></div>');
@@ -612,7 +643,7 @@ function menu(anchor, items, { alignRight = false } = {}) {
     b.onclick = () => { closeMenus(); fn(); };
     pop.append(b);
   });
-  if (anchor instanceof Element) {
+  if (anchor && anchor.nodeType === 1) {   // (not instanceof: floating windows have their own Element)
     anchor.parentElement.style.position = 'relative';
     pop.style[alignRight ? 'right' : 'left'] = '0';
     anchor.parentElement.append(pop);
@@ -643,7 +674,7 @@ function loadLayout() { try { return JSON.parse(localStorage.getItem('layout')) 
    Backup
    ========================================================= */
 function exportAll() {
-  S.panes.forEach(p => p.flush());
+  livePanes().forEach(p => p.flush());
   const data = { app: 'notes', version: 1, exported: new Date().toISOString(), folders: S.folders, notes: [...S.notes.values()] };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
@@ -732,7 +763,7 @@ window.addEventListener('keydown', e => {
   const sidebarCombo = isMac ? (e.metaKey && e.ctrlKey) : (e.ctrlKey && e.altKey);
   if (c === 'KeyN' && e.altKey && !e.shiftKey) go(openSandbox);                       // ⌥⌘N floating rewrite window
   else if (c === 'KeyN' && e.shiftKey) go(newFolderNow);                              // ⇧⌘N new folder
-  else if (c === 'KeyN') go(composeNew);                                              // ⌘N new note
+  else if (c === 'KeyN') go(floatingNote);                                            // ⌘N new note in a floating window
   else if (c === 'KeyS' && (sidebarCombo || e.altKey)) go(toggleSide);                // ⌃⌘S sidebar
   else if (c === 'KeyF' && e.altKey) go(() => { document.body.classList.remove('hide-side', 'typing'); $('#q').focus(); $('#q').select(); });
   else if (c === 'KeyD' && !e.shiftKey && !e.altKey) go(duplicateNote);              // ⌘D duplicate
@@ -748,6 +779,71 @@ window.addEventListener('keydown', e => {
     if (S.panes[i]) go(() => { setActive(S.panes[i]); S.panes[i].editor.commands.focus(); });
   }
 }, true);
+
+/* =========================================================
+   ⌘N: a new note in its own floating window (500×600), like a note window in Apple Notes.
+   Chrome lets one window float on top at a time: a new one takes the spot and the
+   previous note docks into the main window, so nothing disappears. Where floating
+   isn't available (e.g. Arc), each ⌘N opens an ordinary small window instead.
+   ========================================================= */
+const FLOATS = [];   // { win, pane, pip, dock }
+let floatCount = 0;
+function floatsUsePip() { return 'documentPictureInPicture' in window && localStorage.getItem('sandboxPopup') !== '1'; }
+async function floatingNote() {
+  const folder = currentFolder();
+  let win = null, pip = false;
+  if (floatsUsePip()) {
+    FLOATS.forEach(f => { if (f.pip) f.dock = true; });    // the current floating note will dock
+    if (SB) SB.replaced = true;
+    try { win = await documentPictureInPicture.requestWindow({ width: 500, height: 600 }); pip = true; }
+    catch (err) { FLOATS.forEach(f => { f.dock = false; }); win = null; }
+  }
+  if (!win) {
+    const k = floatCount++ % 8;
+    const left = (window.screenX || 0) + 80 + k * 32, top = (window.screenY || 0) + 60 + k * 32;
+    win = window.open('', 'notes-float-' + Date.now(), `popup,width=500,height=600,left=${left},top=${top}`);
+    if (!win) { toast('Chrome blocked the new window'); return; }
+  }
+  const n = newNote(folder);
+  const doc = win.document;
+  doc.head.innerHTML = '';
+  document.querySelectorAll('style').forEach(st => doc.head.append(st.cloneNode(true)));
+  doc.title = 'New Note';
+  doc.body.className = 'floatnote';
+  doc.body.innerHTML = '';
+  const pane = new Pane(n.id, { win, mount: el => doc.body.append(el) });
+  const f = { win, pane, pip, dock: false };
+  FLOATS.push(f);
+  doc.addEventListener('keydown', e => {
+    lastKey = Date.now();
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.code === 'KeyN' && !e.altKey && !e.shiftKey) { e.preventDefault(); floatingNote(); }
+    if (mod && e.code === 'KeyN' && e.altKey) { e.preventDefault(); }
+  }, true);
+  doc.addEventListener('mousedown', e => { if (!e.target.closest('.pop')) closeMenus(); });
+  win.addEventListener('pagehide', () => endFloat(f));
+  setTimeout(() => pane.editor.commands.focus('start'), 30);
+  scheduleList();
+}
+function endFloat(f) {
+  const i = FLOATS.indexOf(f); if (i < 0) return;
+  FLOATS.splice(i, 1);
+  const p = f.pane, id = p.noteId;
+  try { p.flush(); p.editor.destroy(); } catch {}
+  const n = id && S.notes.get(id);
+  if (f.dock && n && !isBlank(n) && !n.deleted) {
+    if (S.panes.length < MAX_PANES) addPane(id, S.active);
+    else toast(`“${n.title}” is saved in your list`);
+  } else if (id) discardIfBlank(id);
+  scheduleList();
+}
+function dockFloat(pane) {
+  const f = FLOATS.find(x => x.pane === pane); if (!f) return;
+  pane.flush(); f.dock = true;
+  try { f.win.close(); } catch {}
+  endFloat(f);
+}
+window.addEventListener('pagehide', () => FLOATS.slice().forEach(f => { try { f.pane.flush(); f.win.close(); } catch {} }));
 
 /* =========================================================
    Floating rewrite window (⌥⌘N)
@@ -782,8 +878,8 @@ async function openSandbox() {
   let win;
   const forcePopup = localStorage.getItem('sandboxPopup') === '1';
   try {
-    if (!forcePopup && 'documentPictureInPicture' in window) win = await documentPictureInPicture.requestWindow({ width: 560, height: 460 });
-  } catch (err) { win = null; }
+    if (!forcePopup && 'documentPictureInPicture' in window) { FLOATS.forEach(f => { if (f.pip) f.dock = true; }); win = await documentPictureInPicture.requestWindow({ width: 560, height: 460 }); }
+  } catch (err) { win = null; FLOATS.forEach(f => { f.dock = false; }); }
   if (!win) win = window.open('', 'notes-rewrite', 'popup,width=580,height=520');
   if (!win) return toast('Chrome blocked the floating window');
   closeSandbox(true);
@@ -893,7 +989,7 @@ function showShortcuts() {
   closeShortcuts();
   const { cmd, opt, ctl, sh } = KEYS;
   const groups = [
-    ['Notes', [['New note', cmd + 'N'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
+    ['Notes', [['New note (floating window)', cmd + 'N'], ['New note in this window', 'pencil button'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
     ['Side by side', [['Open a note next to this one', cmd + '\\'], [(isMac ? '⌘' : 'Ctrl') + '-click a note', 'opens it in a new pane'], ['Move between panes', opt + cmd + '← →'], ['Close pane', opt + cmd + 'W']]],
     ['Text styles', [['Title', sh + cmd + 'T'], ['Heading', sh + cmd + 'H'], ['Subheading', sh + cmd + 'J'], ['Body', sh + cmd + 'B'], ['Monostyled', sh + cmd + 'M'], ['Block quote', cmd + "'"]]],
     ['Lists', [['Bulleted', sh + cmd + '7'], ['Dashed', sh + cmd + '8'], ['Numbered', sh + cmd + '9'], ['Checklist', sh + cmd + 'L'], ['Tick checklist item', sh + cmd + 'U'], ['Indent / outdent', cmd + '] · ' + cmd + '[ · Tab'], ['Move item up / down', ctl + cmd + '↑ ↓'], ['Tab inside a list item', opt + 'Tab']]],
@@ -910,33 +1006,33 @@ function closeShortcuts() { const c = $('#cheats'); if (c) c.remove(); }
    Sync between windows
    ========================================================= */
 bc && (bc.onmessage = ({ data }) => {
-  if (data.t === 'note') { S.notes.set(data.note.id, data.note); S.panes.forEach(p => p.receive(data.note)); if (data.note.deleted) S.panes.forEach(p => { if (p.noteId === data.note.id) p.show(null); }); scheduleList(); }
-  if (data.t === 'gone') { S.notes.delete(data.id); S.panes.forEach(p => { if (p.noteId === data.id) p.show(null); }); scheduleList(); }
+  if (data.t === 'note') { S.notes.set(data.note.id, data.note); livePanes().forEach(p => p.receive(data.note)); if (data.note.deleted) livePanes().forEach(p => { if (p.noteId === data.note.id) p.show(null); }); scheduleList(); }
+  if (data.t === 'gone') { S.notes.delete(data.id); livePanes().forEach(p => { if (p.noteId === data.id) p.show(null); }); scheduleList(); }
   if (data.t === 'folders') { S.folders = data.folders; scheduleList(); }
 });
-window.addEventListener('pagehide', () => S.panes.forEach(p => p.flush()));
+window.addEventListener('pagehide', () => livePanes().forEach(p => p.flush()));
 // Fallback for when the page is opened straight from a file (no live channel there):
 // a window you're not typing in quietly re-reads the notes every second.
-window.addEventListener('blur', () => S.panes.forEach(p => p.flush()));
+window.addEventListener('blur', () => livePanes().forEach(p => p.flush()));
 async function refreshFromDB() {
   const all = await DB.all('notes'), seen = new Set();
   for (const n of all) {
     seen.add(n.id);
     const cur = S.notes.get(n.id);
     if (!cur || n.updated > cur.updated || n.deleted !== cur.deleted || n.pinned !== cur.pinned || n.folder !== cur.folder) {
-      S.notes.set(n.id, n); S.panes.forEach(p => p.receive(n));
-      if (n.deleted) S.panes.forEach(p => { if (p.noteId === n.id) p.show(null); });
+      S.notes.set(n.id, n); livePanes().forEach(p => p.receive(n));
+      if (n.deleted) livePanes().forEach(p => { if (p.noteId === n.id) p.show(null); });
       scheduleList();
     }
   }
-  for (const [id, n] of S.notes) if (!seen.has(id) && !isBlank(n)) { S.notes.delete(id); S.panes.forEach(p => { if (p.noteId === id) p.show(null); }); scheduleList(); }
-  S.panes.forEach(p => p.noteId && p.receive(S.notes.get(p.noteId)));
+  for (const [id, n] of S.notes) if (!seen.has(id) && !isBlank(n)) { S.notes.delete(id); livePanes().forEach(p => { if (p.noteId === id) p.show(null); }); scheduleList(); }
+  livePanes().forEach(p => p.noteId && p.receive(S.notes.get(p.noteId)));
   const folders = (await DB.get('meta', 'folders')) || [];
   if (JSON.stringify(folders) !== JSON.stringify(S.folders)) { S.folders = folders; scheduleList(); }
 }
-setInterval(() => { if (!document.hidden && (!document.hasFocus() || !S.panes.some(p => p.editor.isFocused))) refreshFromDB(); }, 1000);
+setInterval(() => { if (!document.hidden && (!document.hasFocus() || !livePanes().some(p => p.editor.isFocused))) refreshFromDB(); }, 1000);
 window.addEventListener('focus', () => refreshFromDB());
-document.addEventListener('visibilitychange', () => { if (document.hidden) S.panes.forEach(p => p.flush()); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) livePanes().forEach(p => p.flush()); });
 
 /* =========================================================
    Boot
@@ -1011,9 +1107,9 @@ function setupUpdates() {
     if (!hadController || pending) return;
     pending = true;
     const tryReload = () => {
-      const quiet = Date.now() - lastKey > 4000 || document.hidden || !document.hasFocus();
+      const quiet = !FLOATS.length && (Date.now() - lastKey > 4000 || document.hidden || !document.hasFocus());   // never close your floating notes
       if (!quiet) return setTimeout(tryReload, 1500);
-      S.panes.forEach(p => p.flush());
+      livePanes().forEach(p => p.flush());
       saveLayout();
       sessionStorage.setItem('justUpdated', '1');
       setTimeout(() => location.reload(), 150);   // let the last save land
