@@ -773,7 +773,7 @@ window.addEventListener('keydown', e => {
   else if ((c === 'Minus') || (c === 'Comma' && e.shiftKey)) go(() => setZoom(zoom - 0.1));
   else if (c === 'Digit0' && e.shiftKey) go(() => setZoom(1));
   else if (c === 'Backslash') go(() => addPane(newNote(currentFolder()).id, S.active));
-  else if (c === 'KeyW' && e.altKey) go(() => closePane(S.active));
+  else if (c === 'KeyW' && !e.shiftKey) go(() => closePane(S.active));                // ⌘W / ⌥⌘W close this pane — never the whole app
   else if (e.altKey && (c === 'ArrowRight' || c === 'ArrowLeft')) {   // move between panes
     const i = S.panes.indexOf(S.active) + (c === 'ArrowRight' ? 1 : -1);
     if (S.panes[i]) go(() => { setActive(S.panes[i]); S.panes[i].editor.commands.focus(); });
@@ -819,6 +819,7 @@ async function floatingNote() {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.code === 'KeyN' && !e.altKey && !e.shiftKey) { e.preventDefault(); floatingNote(); }
     if (mod && e.code === 'KeyN' && e.altKey) { e.preventDefault(); }
+    if (mod && e.code === 'KeyW' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); win.close(); }   // ⌘W closes only this floating note
   }, true);
   doc.addEventListener('mousedown', e => { if (!e.target.closest('.pop')) closeMenus(); });
   win.addEventListener('pagehide', () => endFloat(f));
@@ -927,7 +928,8 @@ async function openSandbox() {
   doc.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); applySandbox('replace'); }
     if (e.key === 'Escape') { e.preventDefault(); win.close(); }
-  });
+    if ((e.metaKey || e.ctrlKey) && e.code === 'KeyW' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); win.close(); }
+  }, true);
   win.addEventListener('pagehide', () => { if (SB && SB.win === win) closeSandbox(false); });
   editor.commands.focus('end');
 }
@@ -990,7 +992,7 @@ function showShortcuts() {
   const { cmd, opt, ctl, sh } = KEYS;
   const groups = [
     ['Notes', [['New note (floating window)', cmd + 'N'], ['New note in this window', 'pencil button'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
-    ['Side by side', [['Open a note next to this one', cmd + '\\'], [(isMac ? '⌘' : 'Ctrl') + '-click a note', 'opens it in a new pane'], ['Move between panes', opt + cmd + '← →'], ['Close pane', opt + cmd + 'W']]],
+    ['Side by side', [['Open a note next to this one', cmd + '\\'], [(isMac ? '⌘' : 'Ctrl') + '-click a note', 'opens it in a new pane'], ['Move between panes', opt + cmd + '← →'], ['Close pane / floating note', cmd + 'W']]],
     ['Text styles', [['Title', sh + cmd + 'T'], ['Heading', sh + cmd + 'H'], ['Subheading', sh + cmd + 'J'], ['Body', sh + cmd + 'B'], ['Monostyled', sh + cmd + 'M'], ['Block quote', cmd + "'"]]],
     ['Lists', [['Bulleted', sh + cmd + '7'], ['Dashed', sh + cmd + '8'], ['Numbered', sh + cmd + '9'], ['Checklist', sh + cmd + 'L'], ['Tick checklist item', sh + cmd + 'U'], ['Indent / outdent', cmd + '] · ' + cmd + '[ · Tab'], ['Move item up / down', ctl + cmd + '↑ ↓'], ['Tab inside a list item', opt + 'Tab']]],
     ['Edit', [['Bold · Italic · Underline', cmd + 'B · ' + cmd + 'I · ' + cmd + 'U'], ['Strikethrough', sh + cmd + 'S'], ['Link', cmd + 'K'], ['Divider line', cmd + 'L'], ['Bigger / smaller text', cmd + '+ · ' + cmd + '−'], ['Default text size', sh + cmd + '0']]],
