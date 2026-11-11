@@ -213,6 +213,7 @@ function appleBindings() {
     "Mod-'": ed => c(ed).toggleBlockquote().run() || true,
     'Mod-l': ed => c(ed).setHorizontalRule().run() || true,
     'Mod-k': ed => editLink(ed),
+    'Mod-Shift-x': ed => c(ed).toggleStrike().run() || true,   // Apple's strikethrough
     'Ctrl-Mod-ArrowUp': ed => moveItem(ed, -1),
     'Ctrl-Mod-ArrowDown': ed => moveItem(ed, 1),
     'Alt-Tab': ed => c(ed).insertContent('\t').run(),
@@ -429,7 +430,7 @@ class Pane {
       ['Bold', `${K}B`, () => ed.chain().focus().toggleBold().run(), A('bold')],
       ['Italic', `${K}I`, () => ed.chain().focus().toggleItalic().run(), A('italic')],
       ['Underline', `${K}U`, () => ed.chain().focus().toggleUnderline().run(), A('underline')],
-      ['Strikethrough', `${K}⇧S`, () => ed.chain().focus().toggleStrike().run(), A('strike')],
+      ['Strikethrough', `${K}⇧X`, () => ed.chain().focus().toggleStrike().run(), A('strike')],
       '-',
       ['Indent', `${K}] · Tab`, () => { ed.commands.focus(); ed.commands.keyboardShortcut('Tab'); }, ''],
       ['Outdent', `${K}[ · ⇧Tab`, () => { ed.commands.focus(); ed.commands.keyboardShortcut('Shift-Tab'); }, ''],
@@ -629,6 +630,13 @@ window.addEventListener('mousemove', e => {
   if (lastXY && Math.hypot(e.clientX - lastXY[0], e.clientY - lastXY[1]) > 6) document.body.classList.remove('typing');
   lastXY = [e.clientX, e.clientY];
 });
+// ⌘0 — like Window ▸ Notes in Apple Notes: bring the full main window back (sidebar, list, chrome) and put it in front.
+function showMain() {
+  document.body.classList.remove('hide-side', 'hide-folders', 'typing');
+  saveLayout();
+  try { window.focus(); } catch {}
+  const p = S.active; if (p && p.editor) setTimeout(() => p.editor.commands.focus(), 0);
+}
 function toggleSide() { document.body.classList.toggle('hide-side'); saveLayout(); }
 
 function closeMenus() { [document, ...FLOATS.map(f => f.win.document)].forEach(d => { try { d.querySelectorAll('.pop').forEach(p => p.remove()); } catch {} }); }
@@ -772,6 +780,7 @@ window.addEventListener('keydown', e => {
   else if ((c === 'Equal' && !e.shiftKey) || (c === 'Equal' && e.shiftKey) || (c === 'Period' && e.shiftKey)) go(() => setZoom(zoom + 0.1));
   else if ((c === 'Minus') || (c === 'Comma' && e.shiftKey)) go(() => setZoom(zoom - 0.1));
   else if (c === 'Digit0' && e.shiftKey) go(() => setZoom(1));
+  else if (c === 'Digit0' && !e.altKey) go(showMain);                                // ⌘0 full main window
   else if (c === 'Backslash') go(() => addPane(newNote(currentFolder()).id, S.active));
   else if (c === 'KeyW' && !e.shiftKey) go(() => closePane(S.active));                // ⌘W / ⌥⌘W close this pane — never the whole app
   else if (e.altKey && (c === 'ArrowRight' || c === 'ArrowLeft')) {   // move between panes
@@ -820,6 +829,7 @@ async function floatingNote() {
     if (mod && e.code === 'KeyN' && !e.altKey && !e.shiftKey) { e.preventDefault(); floatingNote(); }
     if (mod && e.code === 'KeyN' && e.altKey) { e.preventDefault(); }
     if (mod && e.code === 'KeyW' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); win.close(); }   // ⌘W closes only this floating note
+    if (mod && e.code === 'Digit0' && !e.shiftKey && !e.altKey) { e.preventDefault(); e.stopPropagation(); pane.flush(); showMain(); }   // ⌘0 back to the main window
   }, true);
   doc.addEventListener('mousedown', e => { if (!e.target.closest('.pop')) closeMenus(); });
   win.addEventListener('pagehide', () => endFloat(f));
@@ -929,6 +939,7 @@ async function openSandbox() {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); applySandbox('replace'); }
     if (e.key === 'Escape') { e.preventDefault(); win.close(); }
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyW' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); win.close(); }
+    if ((e.metaKey || e.ctrlKey) && e.code === 'Digit0' && !e.shiftKey && !e.altKey) { e.preventDefault(); e.stopPropagation(); showMain(); }
   }, true);
   win.addEventListener('pagehide', () => { if (SB && SB.win === win) closeSandbox(false); });
   editor.commands.focus('end');
@@ -991,11 +1002,11 @@ function showShortcuts() {
   closeShortcuts();
   const { cmd, opt, ctl, sh } = KEYS;
   const groups = [
-    ['Notes', [['New note (floating window)', cmd + 'N'], ['New note in this window', 'pencil button'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
+    ['Notes', [['New note (floating window)', cmd + 'N'], ['New note in this window', 'pencil button'], ['Rewrite in floating window', opt + cmd + 'N'], ['New folder', sh + cmd + 'N'], ['Duplicate note', cmd + 'D'], ['Search all notes', opt + cmd + 'F'], ['Show/hide sidebar', isMac ? '⌃⌘S' : 'Ctrl+Alt+S'], ['Print note', cmd + 'P'], ['Show the full main window', cmd + '0'], ['Sidebar ↔ list ↔ search', 'Tab'], ['Start typing in selected note', 'Return']]],
     ['Side by side', [['Open a note next to this one', cmd + '\\'], [(isMac ? '⌘' : 'Ctrl') + '-click a note', 'opens it in a new pane'], ['Move between panes', opt + cmd + '← →'], ['Close pane / floating note', cmd + 'W']]],
     ['Text styles', [['Title', sh + cmd + 'T'], ['Heading', sh + cmd + 'H'], ['Subheading', sh + cmd + 'J'], ['Body', sh + cmd + 'B'], ['Monostyled', sh + cmd + 'M'], ['Block quote', cmd + "'"]]],
     ['Lists', [['Bulleted', sh + cmd + '7'], ['Dashed', sh + cmd + '8'], ['Numbered', sh + cmd + '9'], ['Checklist', sh + cmd + 'L'], ['Tick checklist item', sh + cmd + 'U'], ['Indent / outdent', cmd + '] · ' + cmd + '[ · Tab'], ['Move item up / down', ctl + cmd + '↑ ↓'], ['Tab inside a list item', opt + 'Tab']]],
-    ['Edit', [['Bold · Italic · Underline', cmd + 'B · ' + cmd + 'I · ' + cmd + 'U'], ['Strikethrough', sh + cmd + 'S'], ['Link', cmd + 'K'], ['Divider line', cmd + 'L'], ['Bigger / smaller text', cmd + '+ · ' + cmd + '−'], ['Default text size', sh + cmd + '0']]],
+    ['Edit', [['Bold · Italic · Underline', cmd + 'B · ' + cmd + 'I · ' + cmd + 'U'], ['Strikethrough', sh + cmd + 'X'], ['Link', cmd + 'K'], ['Divider line', cmd + 'L'], ['Bigger / smaller text', cmd + '+ · ' + cmd + '−'], ['Default text size', sh + cmd + '0']]],
   ];
   const el = h(`<div id="cheats"><div class="cheatbox"><div class="lhead"><h1>Keyboard shortcuts</h1><button class="ibtn" title="Close (Esc)">${ICON.close}</button></div>
     <div class="cheatcols">${groups.map(([g, rows]) => `<section><div class="label">${esc(g)}</div>${rows.map(([a, k]) => `<div class="crow"><span>${esc(a)}</span><kbd>${esc(k)}</kbd></div>`).join('')}</section>`).join('')}</div></div></div>`);
